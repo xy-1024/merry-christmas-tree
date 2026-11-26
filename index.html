@@ -167,13 +167,13 @@ window.addEventListener('error', function (ev) {
       var y = YBOT + (YTOP - YBOT) * s + big * 0.85 + mid * 0.26 + fine * 0.10;
 
       var th = 0.35 + 1.45 * nz(s * 11 + 99);                 // 绳身忽粗忽细
-      R += gauss(0, 0.055 * th);
-      y += gauss(0, 0.044 * th);
+      R += gauss(0, 0.043 * th);
+      y += gauss(0, 0.035 * th);
 
-      var br = 0.78 + 0.30 * th;                             // 忽明忽暗，但整体是画面里最亮的部分
-      var g = Math.min(255, Math.round((238 + 16 * Math.random()) * br));
-      var b = Math.min(255, Math.round((244 + 11 * Math.random()) * br));
-      if (Math.random() < 0.12) { g = Math.round(226 * br); b = Math.round(200 * br); }  // 透一点粉
+      var br = 0.95 + 0.18 * th;                             // 整体保持最亮，只有轻微明暗起伏
+      var g = Math.min(255, Math.round((224 + 16 * Math.random()) * br));   // 白里透粉，不是死白
+      var b = Math.min(255, g + rint(12, 22));
+      if (Math.random() < 0.12) { g = Math.round(206 * br); b = Math.round(184 * br); }  // 透一点粉
       var delay = 0.20 + 0.95 * s + rnd(-0.10, 0.10);
       pt(Math.cos(a) * R, y, Math.sin(a) * R, 255, g, b, delay);
     }
