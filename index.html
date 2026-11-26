@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Merry Christmas · 3D 圣诞树</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#000;overflow:hidden}
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000}
+  #wrap{position:relative;box-shadow:0 0 120px rgba(80,140,255,.18)}
+  canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+  #gl{z-index:1}
+  #fx{z-index:2;pointer-events:none}
+  #err{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:#fff;
+       font:15px/1.7 system-ui,"Microsoft YaHei",sans-serif;text-align:center;padding:24px 28px;
+       border:1px solid rgba(255,255,255,.18);border-radius:12px;background:rgba(255,255,255,.06)}
+</style>
+</head>
+<body>
+<div id="stage"><div id="wrap"><canvas id="gl"></canvas><canvas id="fx"></canvas></div></div>
+<script>
+window.addEventListener('error', function (ev) {
+  var d = document.createElement('div');
+  d.style.cssText = 'position:fixed;left:8px;top:8px;z-index:99;color:#ff8888;font:12px monospace;white-space:pre-wrap;max-width:90%';
+  d.textContent = 'ERR: ' + ev.message + ' @' + ev.lineno + ':' + ev.colno;
+  document.body.appendChild(d);
+});
+(function () {
+  'use strict';
+
+  /* ================== 可改文案 ================== */
+  var CONFIG = {
+    line1: 'Merry Christmas',
+    line2: 'TO: 西米露'      // 改成你自己的名字/祝福
+  };
+
+  /* ================== 全局参数 ================== */
+  var DW = 1600, DH = 900, TAU = Math.PI * 2;
+  var CAM_DIST = 13.0, CAM_HEIGHT = 6.0, PITCH = -0.25;
+  var SIN_P = Math.sin(PITCH), COS_P = Math.cos(PITCH);
+
+  // 树：外层飘散半径（内核锥半径 = coneR * CORE）
+  var YBOT = 0.60, YTOP = 10.0, RBOT = 3.90, RTAPER = 0.74;
+  var CORE = 0.68;                   // 内核密集锥占外沿的比例
+  var COILS = 6;                     // 螺旋光带圈数
+  var RING_SCALE = 1.16;             // 地面光环尺度
+
+  // 粒子数量
+  var BODY_POINTS = 11000;           // 树体粒子（疏一点，留出黑色间隙）
+  var GROUND_POINTS = 7000;          // 地面粒子场（疏一点更像视频）
+  var SKY_POINTS = 1200;             // 空中星点
+  var RIBBON_POINTS = 16000;         // 螺旋光带（那条发光的粗绳）
+
+  // 聚合动画
+  var ASSEMBLE_DUR = 1.10;           // 单个粒子飞到位所需秒数
+  var RING_FADE_AT = 1.95;           // 光环开始浮现
+  var RING_FADE_DUR = 0.95;
+  var STAR_FADE_AT = 2.10;           // 星星弹出
+  var STAR_FADE_DUR = 0.65;
+
+  var TOTAL = BODY_POINTS + GROUND_POINTS + SKY_POINTS + RIBBON_POINTS;
+
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+  function rint(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); }
+  function gauss(mu, sd) {
+    var u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return mu + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+  }
+
+  // 一维值噪声：打散“完美几何”的规则感
+  var NOISE = [];
+  for (var q = 0; q < 512; q++) NOISE.push(Math.random());
+  function nz(x) {
+    var i = Math.floor(x), f = x - i;
+    var a0 = NOISE[(i + 512) % 512], a1 = NOISE[(i + 1 + 512) % 512];
+    return a0 + (a1 - a0) * (f * f * (3 - 2 * f));
+  }
+
+  function coneR(h) { return RBOT * Math.pow(1 - RTAPER * h, 1.05); }
+
+  /* ================== 粒子缓冲：目标位置 + 起点位置 + 出发时间 ================== */
+  // 每条 = x,y,z, r,g,b, sx,sy,sz, delay
+  var data = new Float32Array(TOTAL * 10);
+  var p = 0;
+
+  function pt(x, y, z, r, g, b, delay) {
+    data[p++] = x; data[p++] = y; data[p++] = z;
+    data[p++] = r / 255; data[p++] = g / 255; data[p++] = b / 255;
+    if (delay < 0) {                      // 常驻粒子（空中星点）
+      data[p++] = x; data[p++] = y; data[p++] = z;
+    } else {                              // 从远处星尘里飞过来
+      var sr = 5.5 + 21.0 * Math.pow(Math.random(), 0.60);
+      var sa = Math.random() * TAU;
+      var sy = -0.4 + Math.random() * 14.0;
+      data[p++] = Math.cos(sa) * sr;
+      data[p++] = sy;
+      data[p++] = Math.sin(sa) * sr;
+    }
+    data[p++] = delay < 0 ? -999 : delay;
+  }
+
+  /* ================== 树体：窄内核锥 + 外围飘散粒子雾 ================== */
+  function genTree() {
+    for (var k = 0; k < BODY_POINTS; k++) {
+      var h = 1 - Math.sqrt(Math.random());                                  // 下密上疏
+      h = Math.min(1, Math.max(0, h + (nz(h * 6 + 3) - 0.5) * 0.05));
+      var Rc = coneR(h) * CORE * (1 + (nz(h * 5 + 9) - 0.5) * 0.10);         // 内核半径
+      var r, lum, dy;
+
+      if (Math.random() < 0.46) {
+        // 外层：飘出锥面的雾状粒子，让轮廓毛茸茸
+        r = Rc * (1.0 + 1.05 * Math.pow(Math.random(), 1.7));
+        lum = 0.55 + 0.28 * nz(h * 7 + 15);
+        dy = rnd(-0.16, 0.16);
+      } else {
+        // 内核：贴着光带的一团亮粒子
+        r = Rc * (0.42 + 0.58 * Math.pow(Math.random(), 0.5));
+        lum = (0.72 + 0.22 * nz(h * 7 + 15)) * (0.86 + 0.14 * (1 - h));
+        dy = rnd(-0.05, 0.05);
+      }
+      var a = Math.random() * TAU;
+
+      // 白粉：红恒 255，绿高、蓝再高一点点 → 亮而偏粉
+      var g = Math.min(255, Math.round(rint(178, 226) * lum) + 34);
+      var b = Math.min(255, g + rint(14, 26));
+      if (Math.random() < 0.05) { g = rint(246, 255); b = rint(250, 255); }   // 少量纯白闪点
+
+      var delay = 0.18 + 0.95 * h + rnd(-0.14, 0.14);                        // 从下往上长
+      pt(Math.cos(a) * r, YBOT + (YTOP - YBOT) * h + dy, Math.sin(a) * r,
+         255, g, b, delay);
+    }
+  }
+
+  /* ================== 地面粒子场 ================== */
+  function genGround() {
+    for (var k = 0; k < GROUND_POINTS; k++) {
+      var r = 14.0 * Math.pow(Math.random(), 0.62);
+      var a = Math.random() * TAU;
+      var c = Math.random() < 0.15 ? rint(228, 252) : rint(176, 226);
+      var delay = 1.00 + rnd(0.0, 0.55);
+      pt(Math.cos(a) * r, -0.25 + rnd(-0.06, 0.06), Math.sin(a) * r, 255, c, Math.min(255, c + 14), delay);
+    }
+  }
+
+  /* ================== 空中星点（常驻背景） ================== */
+  function genSky() {
+    for (var k = 0; k < SKY_POINTS; k++) {
+      var base = rint(215, 255);
+      pt(rnd(-18, 18), rnd(3, 18), rnd(-18, 18), base, base, 255, -1);
+    }
+  }
+
+  /* ================== 螺旋光绳：绕锥面上盘，粗细/高低/转角都不规则 ================== */
+  function genRibbon() {
+    for (var k = 0; k < RIBBON_POINTS; k++) {
+      var s = 1 - Math.sqrt(Math.random());                  // 沿绳均匀（下圈更长 → 粒子更多）
+      var big  = nz(s * 7.5 + 3)  - 0.5;                     // 大尺度摆动：整圈歪一点
+      var mid  = nz(s * 21 + 41)  - 0.5;                     // 中尺度抖动
+      var fine = nz(s * 58 + 77)  - 0.5;                     // 细碎抖动
+
+      var Rc0 = coneR(s) * CORE;
+      var R = Rc0 * (1.08 + big * 0.42) + mid * 0.16;         // 半径小幅起伏：大致贴着锥面
+      var a = s * COILS * TAU + big * 0.75 + mid * 0.30;      // 圈距忽宽忽窄，但不乱
+      var y = YBOT + (YTOP - YBOT) * s + big * 0.85 + mid * 0.26 + fine * 0.10;
+
+      var th = 0.35 + 1.45 * nz(s * 11 + 99);                 // 绳身忽粗忽细
+      R += gauss(0, 0.055 * th);
+      y += gauss(0, 0.044 * th);
+
+      var br = 0.78 + 0.30 * th;                             // 忽明忽暗，但整体是画面里最亮的部分
+      var g = Math.min(255, Math.round((238 + 16 * Math.random()) * br));
+      var b = Math.min(255, Math.round((244 + 11 * Math.random()) * br));
+      if (Math.random() < 0.12) { g = Math.round(226 * br); b = Math.round(200 * br); }  // 透一点粉
+      var delay = 0.20 + 0.95 * s + rnd(-0.10, 0.10);
+      pt(Math.cos(a) * R, y, Math.sin(a) * R, 255, g, b, delay);
+    }
+  }
+
+  genTree(); genGround(); genSky(); genRibbon();
+
+  /* ================== 螺旋光环（线段，细而亮） ================== */
+  var RING_STEPS = 120;
+  var spiralVerts = [];
+  var spiralCount = COILS * RING_STEPS;
+  for (var si = 0; si <= spiralCount; si++) {
+    var t = si / spiralCount;
+    var ang = t * COILS * TAU;
+    var rr = coneR(t) * RING_SCALE;
+    spiralVerts.push(Math.cos(ang) * rr, YBOT + (YTOP - YBOT) * t + 0.06, Math.sin(ang) * rr);
+  }
+
+  var groundRings = [5.2, 6.9, 8.6, 10.3, 11.9, 13.4];
+  var ringVerts = [];
+  for (var gi = 0; gi < groundRings.length; gi++) {
+    for (var gj = 0; gj < RING_STEPS; gj++) {
+      var ga = gj / RING_STEPS * TAU;
+      ringVerts.push(Math.cos(ga) * groundRings[gi], -0.22, Math.sin(ga) * groundRings[gi]);
+    }
+  }
+  var spiralOffset = 0;
+  var ringOffset = (spiralCount + 1) * 3;
+
+  /* ================== 前景 2D 大雪花 ================== */
+  var flakes = [];
+  function respawn(f) {
+    f[0] = rnd(0, DW);
+    f[1] = rnd(-80, -10);
+    f[2] = rnd(10, 16);
+    f[3] = rnd(30, 45);
+    f[4] = (DH + 80 - f[1]) / f[3];
+    f[5] = f[4];
+  }
+  for (var s = 0; s < 10; s++) { var f0 = []; respawn(f0); flakes.push(f0); }
+
+  /* ================== WebGL ================== */
+  var glCanvas = document.getElementById('gl');
+  var fxCanvas = document.getElementById('fx');
+  var fx = fxCanvas.getContext('2d');
+  var gl = glCanvas.getContext('webgl', { antialias: true, alpha: false, premultipliedAlpha: false });
+
+  if (!gl) {
+    document.body.insertAdjacentHTML('beforeend',
+      '<div id="err">这个页面需要 WebGL。<br>请用 Chrome / Edge / Firefox 打开，并确认已启用硬件加速。</div>');
+    return;
+  }
+
+  var VS = [
+    'attribute vec3 aPos;',
+    'attribute vec3 aColor;',
+    'attribute vec3 aFrom;',
+    'attribute float aDelay;',
+    'uniform float uAngle;',
+    'uniform float uAspect;',
+    'uniform float uScale;',
+    'uniform float uSizeMul;',
+    'uniform float uMinPx;',
+    'uniform float uTime;',
+    'uniform float uDur;',
+    'varying vec3 vColor;',
+    'void main(){',
+    '  float pr = clamp((uTime - aDelay) / uDur, 0.0, 1.0);',
+    '  pr = 1.0 - pow(1.0 - pr, 3.0);',
+    '  vec3 pos = mix(aFrom, aPos, pr);',
+    '  float spin = (1.0 - pr) * 1.15;',
+    '  float cs = cos(spin), sn = sin(spin);',
+    '  pos = vec3(pos.x*cs - pos.z*sn, pos.y, pos.x*sn + pos.z*cs);',
+    '  float ca = cos(uAngle), sa = sin(uAngle);',
+    '  float xz = pos.x*ca - pos.z*sa;',
+    '  float zz = pos.x*sa + pos.z*ca;',
+    '  float sinP = -0.2474039593;',
+    '  float cosP =  0.9689124217;',
+    '  float yp = pos.y*cosP - zz*sinP - 6.0;',
+    '  float zp = pos.y*sinP + zz*cosP + 13.0;',
+    '  if (zp <= 0.1) {',
+    '    gl_Position = vec4(0.0, 0.0, -2.0, 1.0);',
+    '    gl_PointSize = 0.0;',
+    '    vColor = vec3(0.0);',
+    '  } else {',
+    '    gl_Position = vec4(1.26*xz/(zp*uAspect), 1.26*yp/zp, (zp-6.0)/28.0, 1.0);',
+    '    float sz = max(1.0, 3.6 - zp*0.13);',
+    '    gl_PointSize = max(sz * uSizeMul * uScale, uMinPx * uSizeMul);',
+    '    vColor = aColor;',
+    '  }',
+    '}'
+  ].join('\n');
+
+  var FS = [
+    'precision mediump float;',
+    'varying vec3 vColor;',
+    'uniform float uAlphaMul;',
+    'void main(){',
+    '  float d = length(gl_PointCoord - vec2(0.5));',
+    '  float a = (1.0 - smoothstep(0.30, 0.52, d)) * uAlphaMul;',
+    '  if (a <= 0.0) discard;',
+    '  gl_FragColor = vec4(vColor, a);',
+    '}'
+  ].join('\n');
+
+  var VS_LINE = [
+    'attribute vec3 aPos;',
+    'uniform float uAngle;',
+    'uniform float uAspect;',
+    'void main(){',
+    '  float ca = cos(uAngle), sa = sin(uAngle);',
+    '  float xz = aPos.x*ca - aPos.z*sa;',
+    '  float zz = aPos.x*sa + aPos.z*ca;',
+    '  float sinP = -0.2474039593;',
+    '  float cosP =  0.9689124217;',
+    '  float yp = aPos.y*cosP - zz*sinP - 6.0;',
+    '  float zp = aPos.y*sinP + zz*cosP + 13.0;',
+    '  gl_Position = vec4(1.26*xz/(zp*uAspect), 1.26*yp/zp, 0.0, 1.0);',
+    '}'
+  ].join('\n');
+
+  var FS_LINE = [
+    'precision mediump float;',
+    'uniform float uAlpha;',
+    'void main(){',
+    '  gl_FragColor = vec4(1.0, 1.0, 1.0, uAlpha);',
+    '}'
+  ].join('\n');
+
+  function compile(type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    return sh;
+  }
+  function program(vs, fs) {
+    var pr = gl.createProgram();
+    gl.attachShader(pr, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(pr, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+    return pr;
+  }
+
+  /* ---- 粒子程序 ---- */
+  var prog = program(VS, FS);
+  gl.useProgram(prog);
+  var loc = {
+    pos: gl.getAttribLocation(prog, 'aPos'),
+    col: gl.getAttribLocation(prog, 'aColor'),
+    from: gl.getAttribLocation(prog, 'aFrom'),
+    delay: gl.getAttribLocation(prog, 'aDelay'),
+    angle: gl.getUniformLocation(prog, 'uAngle'),
+    aspect: gl.getUniformLocation(prog, 'uAspect'),
+    scale: gl.getUniformLocation(prog, 'uScale'),
+    sizeMul: gl.getUniformLocation(prog, 'uSizeMul'),
+    alphaMul: gl.getUniformLocation(prog, 'uAlphaMul'),
+    minPx: gl.getUniformLocation(prog, 'uMinPx'),
+    time: gl.getUniformLocation(prog, 'uTime'),
+    dur: gl.getUniformLocation(prog, 'uDur')
+  };
+  var STRIDE = 10 * 4;
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(loc.pos);
+  gl.vertexAttribPointer(loc.pos, 3, gl.FLOAT, false, STRIDE, 0);
+  gl.enableVertexAttribArray(loc.col);
+  gl.vertexAttribPointer(loc.col, 3, gl.FLOAT, false, STRIDE, 3 * 4);
+  gl.enableVertexAttribArray(loc.from);
+  gl.vertexAttribPointer(loc.from, 3, gl.FLOAT, false, STRIDE, 6 * 4);
+  gl.enableVertexAttribArray(loc.delay);
+  gl.vertexAttribPointer(loc.delay, 1, gl.FLOAT, false, STRIDE, 9 * 4);
+  gl.uniform1f(loc.aspect, DW / DH);
+  gl.uniform1f(loc.dur, ASSEMBLE_DUR);
+
+  /* ---- 光环程序 ---- */
+  var lineProg = program(VS_LINE, FS_LINE);
+  gl.useProgram(lineProg);
+  var lloc = {
+    pos: gl.getAttribLocation(lineProg, 'aPos'),
+    angle: gl.getUniformLocation(lineProg, 'uAngle'),
+    aspect: gl.getUniformLocation(lineProg, 'uAspect'),
+    alpha: gl.getUniformLocation(lineProg, 'uAlpha')
+  };
+  gl.uniform1f(lloc.aspect, DW / DH);
+
+  var lineData = new Float32Array(spiralVerts.concat(ringVerts));
+  var lineBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, lineData, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(lloc.pos);
+  gl.vertexAttribPointer(lloc.pos, 3, gl.FLOAT, false, 3 * 4, 0);
+
+  gl.clearColor(0, 0, 0, 1);
+  gl.depthFunc(gl.LEQUAL);
+
+  /* ================== 布局 ================== */
+  var wrapEl = document.getElementById('wrap');
+  var scale = 1;
+  function layout() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var cssW = vw, cssH = vw * DH / DW;
+    if (cssH > vh) { cssH = vh; cssW = vh * DW / DH; }
+    cssW = Math.round(cssW); cssH = Math.round(cssH);
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    wrapEl.style.width = cssW + 'px';
+    wrapEl.style.height = cssH + 'px';
+
+    glCanvas.width = Math.round(cssW * dpr);
+    glCanvas.height = Math.round(cssH * dpr);
+    fxCanvas.width = glCanvas.width;
+    fxCanvas.height = glCanvas.height;
+
+    gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+    scale = glCanvas.width / DW;
+    gl.useProgram(prog);
+    gl.uniform1f(loc.scale, scale);
+    gl.uniform1f(loc.minPx, 1.15);
+    fx.setTransform(scale, 0, 0, scale, 0, 0);
+  }
+  layout();
+  window.addEventListener('resize', layout);
+
+  /* ================== 投影（给 2D 覆盖层用） ================== */
+  function project(x, y, z, angle) {
+    var ca = Math.cos(angle), sa = Math.sin(angle);
+    var xz = x * ca - z * sa;
+    var zz = x * sa + z * ca;
+    var yp = y * COS_P - zz * SIN_P - CAM_HEIGHT;
+    var zp = y * SIN_P + zz * COS_P + CAM_DIST;
+    var f = (DH * 0.63) / zp;
+    return [DW / 2 + xz * f, DH / 2 - yp * f, zp];
+  }
+
+  /* ================== 覆盖层：星星 / 文字 / 雪花 ================== */
+  function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+  function easeOutBack(v) {
+    var c = 1.70158, c3 = c + 1;
+    return 1 + c3 * Math.pow(v - 1, 3) + c * Math.pow(v - 1, 2);
+  }
+
+  function drawStar(alpha, grow) {
+    if (alpha <= 0.01) return;
+    var pj = project(0, YTOP + 0.52, 0, 0);
+    fx.save();
+    fx.globalAlpha = alpha;
+    fx.translate(pj[0], pj[1]);
+    fx.scale(grow, grow);
+
+    // 外发光
+    var grd = fx.createRadialGradient(0, 0, 5, 0, 0, 76);
+    grd.addColorStop(0, 'rgba(255,255,255,0.50)');
+    grd.addColorStop(0.35, 'rgba(255,235,245,0.14)');
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    fx.fillStyle = grd;
+    fx.beginPath();
+    fx.arc(0, 0, 76, 0, TAU);
+    fx.fill();
+
+    // 五角星
+    fx.beginPath();
+    for (var i = 0; i < 10; i++) {
+      var rad = (i % 2 === 0) ? 30 : 13;
+      var an = -Math.PI / 2 + i * Math.PI / 5;
+      var px = Math.cos(an) * rad, py = Math.sin(an) * rad;
+      if (i === 0) fx.moveTo(px, py); else fx.lineTo(px, py);
+    }
+    fx.closePath();
+    fx.fillStyle = '#fff';
+    fx.shadowColor = 'rgba(255,255,255,0.95)';
+    fx.shadowBlur = 20;
+    fx.fill();
+    fx.restore();
+  }
+
+  var FONT_STACK = '"Monotype Corsiva","Segoe Script","KaiTi","STKaiti","Brush Script MT","Ink Free",cursive';
+  var TITLE_SIZE = 64;              // 标题字号（想更大就调这里）
+  function drawText() {
+    fx.textBaseline = 'top';
+    fx.textAlign = 'left';
+    fx.font = TITLE_SIZE + 'px ' + FONT_STACK;
+    fx.fillStyle = '#fff';
+    var y0 = DH / 3;
+    fx.fillText(CONFIG.line1, 40, y0);
+    fx.fillText(CONFIG.line2, 40, y0 + TITLE_SIZE * 1.28);
+  }
+
+  function updateSnow(dt) {
+    for (var i = 0; i < flakes.length; i++) {
+      var f = flakes[i];
+      f[1] += f[3] * dt;
+      f[4] -= dt;
+      if (f[4] <= 0 || f[1] > DH + 50) respawn(f);
+    }
+  }
+  function drawSnow() {
+    for (var i = 0; i < flakes.length; i++) {
+      var f = flakes[i];
+      if (f[5] <= 0) continue;
+      var phase = f[4] / f[5];
+      var alpha = phase > 0.3 ? 255 : Math.max(0, Math.floor(255 * (phase / 0.3)));
+      var x = f[0], y = f[1], r = f[2];
+      var rings = [
+        [r * 1.3, Math.floor(alpha / 20)],
+        [r * 1.0, Math.floor(alpha / 12)],
+        [r * 0.75, Math.floor(alpha / 6)],
+        [r * 0.55, Math.floor(alpha / 3)],
+        [r * 0.45, alpha]
+      ];
+      for (var k = 0; k < rings.length; k++) {
+        var rr = rings[k][0], aa = rings[k][1];
+        if (aa <= 0) continue;
+        fx.beginPath();
+        fx.arc(x, y, Math.max(1, rr), 0, TAU);
+        fx.fillStyle = 'rgba(255,255,255,' + (aa / 255).toFixed(3) + ')';
+        fx.fill();
+      }
+    }
+  }
+
+  /* ================== 主循环 ================== */
+  var angle = 0, elapsed = 0;
+  var last = performance.now();
+
+  function frame(now) {
+    var dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    elapsed += dt;
+    angle += 0.27 * dt;
+
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    /* ---- 粒子：先加色光晕，再正常混合主体 ---- */
+    gl.useProgram(prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.enableVertexAttribArray(loc.pos);
+    gl.vertexAttribPointer(loc.pos, 3, gl.FLOAT, false, STRIDE, 0);
+    gl.enableVertexAttribArray(loc.col);
+    gl.vertexAttribPointer(loc.col, 3, gl.FLOAT, false, STRIDE, 3 * 4);
+    gl.enableVertexAttribArray(loc.from);
+    gl.vertexAttribPointer(loc.from, 3, gl.FLOAT, false, STRIDE, 6 * 4);
+    gl.enableVertexAttribArray(loc.delay);
+    gl.vertexAttribPointer(loc.delay, 1, gl.FLOAT, false, STRIDE, 9 * 4);
+    gl.uniform1f(loc.angle, angle);
+    gl.uniform1f(loc.time, elapsed);
+
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.uniform1f(loc.sizeMul, 2.6);
+    gl.uniform1f(loc.alphaMul, 0.07);
+    gl.drawArrays(gl.POINTS, 0, TOTAL);
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.uniform1f(loc.sizeMul, 1.0);
+    gl.uniform1f(loc.alphaMul, 1.0);
+    gl.drawArrays(gl.POINTS, 0, TOTAL);
+
+    /* ---- 地面光环：细白线，粒子聚好之后再浮现 ---- */
+    var ringA = clamp01((elapsed - RING_FADE_AT) / RING_FADE_DUR);
+    if (ringA > 0) {
+      gl.useProgram(lineProg);
+      gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+      gl.enableVertexAttribArray(lloc.pos);
+      gl.vertexAttribPointer(lloc.pos, 3, gl.FLOAT, false, 3 * 4, 0);
+      gl.uniform1f(lloc.angle, angle);
+      gl.disable(gl.DEPTH_TEST);
+      gl.depthMask(false);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.uniform1f(lloc.alpha, 0.16 * ringA);
+      for (var gi = 0; gi < groundRings.length; gi++) {
+        gl.drawArrays(gl.LINE_LOOP, spiralCount + 1 + gi * RING_STEPS, RING_STEPS);
+      }
+    }
+
+    /* ---- 覆盖层 ---- */
+    updateSnow(dt);
+    fx.clearRect(0, 0, DW, DH);
+    var starA = clamp01((elapsed - STAR_FADE_AT) / STAR_FADE_DUR);
+    drawStar(starA, easeOutBack(starA));
+    drawText();
+    drawSnow();
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
