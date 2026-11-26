@@ -30,9 +30,18 @@ window.addEventListener('error', function (ev) {
   'use strict';
 
   /* ================== 可改文案 ================== */
+  // ↓↓↓ 只改这一行就能换名字 ↓↓↓
+  var NAME = "xy";
+  // 也可以在网址后面加 ?name=小美 临时换名字（不用改代码）
+  var NAME_IN_URL = "";
+  try {
+    var qs = new URLSearchParams(location.search);
+    NAME_IN_URL = qs.get('name') || qs.get('to') || "";
+  } catch (e) {}
+
   var CONFIG = {
     line1: 'Merry Christmas',
-    line2: 'TO: 西米露'      // 改成你自己的名字/祝福
+    line2: 'TO: ' + (NAME_IN_URL || NAME)
   };
 
   /* ================== 全局参数 ================== */
@@ -171,9 +180,9 @@ window.addEventListener('error', function (ev) {
       y += gauss(0, 0.035 * th);
 
       var br = 0.95 + 0.18 * th;                             // 整体保持最亮，只有轻微明暗起伏
-      var g = Math.min(255, Math.round((224 + 16 * Math.random()) * br));   // 白里透粉，不是死白
-      var b = Math.min(255, g + rint(12, 22));
-      if (Math.random() < 0.12) { g = Math.round(206 * br); b = Math.round(184 * br); }  // 透一点粉
+      var g = Math.min(255, Math.round((204 + 20 * Math.random()) * br));   // 偏白粉，不死白
+      var b = Math.min(255, g + rint(8, 20));
+      if (Math.random() < 0.14) { g = Math.round(196 * br); b = Math.round(172 * br); }  // 透一点粉
       var delay = 0.20 + 0.95 * s + rnd(-0.10, 0.10);
       pt(Math.cos(a) * R, y, Math.sin(a) * R, 255, g, b, delay);
     }

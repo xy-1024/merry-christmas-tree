@@ -4,17 +4,29 @@
 
 ## 在线看
 
-把本仓库开启 GitHub Pages 后，访问 `https://<你的用户名>.github.io/<仓库名>/` 即可。
+https://xy-1024.github.io/merry-christmas-tree/
 
-## 改名字
+## 换名字（两种方式）
 
-用记事本打开 `index.html`，改动顶部这一行：
+**方式一：改代码**
+
+打开 `index.html`，顶部有一行注释很清楚的位置：
 
 ```js
-var NAME = "西米露";
+var NAME = "xy";
 ```
 
-保存后刷新页面即生效。
+改成任意名字即可。
+
+**方式二：不改代码，直接在网址后面加参数**
+
+```
+https://xy-1024.github.io/merry-christmas-tree/?name=小美
+```
+
+打开就是「TO: 小美」，适合发不同的人，不用改仓库。
+
+> 中文名字建议让浏览器自动编码，直接把中文粘到网址末尾通常也能用；如果链接被截断，可以用 `?name=XiaoMei` 这类英文写法。
 
 ## 说明
 
